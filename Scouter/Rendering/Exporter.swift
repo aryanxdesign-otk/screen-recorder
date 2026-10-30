@@ -36,19 +36,16 @@ final class Exporter: @unchecked Sendable {
     private var cancelled = false
 
     func cancel() {
-        lock.lock()
-        cancelled = true
-        let session = self.session
-        let reader = self.reader
-        lock.unlock()
+        let (session, reader) = lock.withLock {
+            cancelled = true
+            return (self.session, self.reader)
+        }
         session?.cancelExport()
         reader?.cancelReading()
     }
 
     private var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
+        lock.withLock { cancelled }
     }
 
     func export(
@@ -93,37 +90,30 @@ final class Exporter: @unchecked Sendable {
         }
         session.videoComposition = videoComposition
         session.audioMix = audioMix
-        session.outputURL = url
-        session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
 
-        lock.lock()
-        self.session = session
-        let alreadyCancelled = cancelled
-        lock.unlock()
+        let alreadyCancelled = lock.withLock {
+            self.session = session
+            return cancelled
+        }
         if alreadyCancelled { throw CancellationError() }
 
         let poller = Task {
-            while !Task.isCancelled {
-                progress(Double(session.progress))
-                try? await Task.sleep(nanoseconds: 100_000_000)
+            for await state in session.states(updateInterval: 0.1) {
+                if case .exporting(let exportProgress) = state {
+                    progress(exportProgress.fractionCompleted)
+                }
             }
         }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            session.exportAsynchronously {
-                continuation.resume()
-            }
-        }
-        poller.cancel()
+        defer { poller.cancel() }
 
-        switch session.status {
-        case .completed:
-            progress(1)
-        case .cancelled:
-            throw CancellationError()
-        default:
-            throw ScouterError.exportFailed(session.error?.localizedDescription ?? "Unknown error")
+        do {
+            try await session.export(to: url, as: .mp4)
+        } catch {
+            if isCancelled { throw CancellationError() }
+            throw ScouterError.exportFailed(error.localizedDescription)
         }
+        progress(1)
     }
 
     private func exportGIF(
@@ -142,9 +132,7 @@ final class Exporter: @unchecked Sendable {
         guard reader.canAdd(output) else { throw ScouterError.exportFailed("Couldn't read the composition.") }
         reader.add(output)
 
-        lock.lock()
-        self.reader = reader
-        lock.unlock()
+        lock.withLock { self.reader = reader }
 
         guard reader.startReading() else {
             throw ScouterError.exportFailed(reader.error?.localizedDescription ?? "Couldn't start reading.")

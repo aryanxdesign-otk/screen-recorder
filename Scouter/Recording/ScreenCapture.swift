@@ -126,7 +126,9 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     /// Starts the stream (frames are buffered but not written until `beginWriting`).
     func prepare(target: CaptureTarget, captureSystemAudio: Bool, microphoneID: String?) async throws -> Setup {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // Not limited to on-screen windows: Scouter's own panels are hidden at this point, and we
+        // still need its SCRunningApplication so the countdown and controls are excluded from capture.
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let ownApps = content.applications.filter { $0.processID == ownPID }
 
