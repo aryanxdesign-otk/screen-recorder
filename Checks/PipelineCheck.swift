@@ -424,7 +424,7 @@ struct PipelineCheck {
 
     /// 3×2 grid of the key renders, small enough to inspect from the CI log.
     static func makeReviewGrid(in output: URL) throws {
-        let names = ["still-0.30s.jpg", "still-1.10s.jpg", "still-2.00s.jpg", "export-frame-1.10s.jpg", "variant-vertical.jpg", "variant-solid.jpg"]
+        let names = ["still-0.30s.jpg", "still-0.75s.jpg", "still-2.00s.jpg", "export-frame-0.75s.jpg", "variant-vertical.jpg", "variant-solid.jpg"]
         let tile = CGSize(width: 288, height: 162)
         let context = CGContext(data: nil, width: Int(tile.width) * 3, height: Int(tile.height) * 2, bitsPerComponent: 8, bytesPerRow: 0, space: RenderContext.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.setFillColor(CGColor(gray: 0.15, alpha: 1))
@@ -457,12 +457,12 @@ struct PipelineCheck {
         let mp4 = output.appendingPathComponent("export-1080p.mp4")
         try await exporter.export(media: media, info: project.info, state: project.state, options: ExportOptions(format: .mp4, resolution: .p1080, fps: 60), to: mp4) { _ in }
         try await describeMovie(mp4, expectedSize: CGSize(width: 1920, height: 1080), expectedDuration: duration, expectAudio: true)
-        // A frame from the exported file, mid-zoom, to confirm the compositor path matches the stills.
+        // A frame from the exported file at peak zoom speed (default blur strength), to confirm the compositor path matches the stills.
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: mp4))
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
-        let frame = try await generator.image(at: CMTime(seconds: 1.1, preferredTimescale: 600)).image
-        try writeJPEG(frame, to: output.appendingPathComponent("export-frame-1.10s.jpg"))
+        let frame = try await generator.image(at: CMTime(seconds: 0.75, preferredTimescale: 600)).image
+        try writeJPEG(frame, to: output.appendingPathComponent("export-frame-0.75s.jpg"))
         try makeReviewGrid(in: output)
 
         var cut = project.state

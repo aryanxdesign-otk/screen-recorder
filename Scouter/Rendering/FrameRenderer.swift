@@ -172,9 +172,12 @@ enum FrameRenderer {
 
         var result = scene
 
+        // CIZoomBlur smears each pixel towards the centre in proportion to its distance from it, which is
+        // exactly how a zoom moves pixels, so the amount only depends on zoom speed (not resolution).
+        // At the default strength this is about a half-frame shutter: soft edges, sharp focus point.
         let zoomSpeed = abs(log(s) - log(previousScale)) / dt
-        let zoomAmount = min(zoomSpeed * 7 * strength, 14) * unit
-        if zoomAmount > 0.4 {
+        let zoomAmount = min(zoomSpeed * 1.7 * strength, 2.5)
+        if zoomAmount > 0.08 {
             let focusCanvas = snapshot.geometry.focusPoint(focus)
             let center = CIVector(x: (focusCanvas.x - view.minX) * s, y: canvas.height - (focusCanvas.y - view.minY) * s)
             result = result.clampedToExtent()
