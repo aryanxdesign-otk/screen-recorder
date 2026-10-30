@@ -174,7 +174,11 @@ final class RecorderController: NSObject {
             CGRequestScreenCaptureAccess()
             let alert = NSAlert()
             alert.messageText = "Scouter needs Screen Recording permission"
-            alert.informativeText = "Turn on Scouter in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Scouter."
+            alert.informativeText = """
+            Turn on Scouter in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Scouter.
+
+            If Scouter is already turned on there, the permission belongs to an older copy of the app. Remove Scouter from the list with the – button (or run “tccutil reset All app.scouter.Scouter” in Terminal), then reopen Scouter and allow it again.
+            """
             alert.addButton(withTitle: "Open System Settings")
             alert.addButton(withTitle: "Cancel")
             if alert.runModal() == .alertFirstButtonReturn,

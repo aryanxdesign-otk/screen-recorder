@@ -18,6 +18,14 @@ On first use macOS asks for:
 | Microphone | When you choose a microphone | Recording your voice |
 | Camera | When you choose a camera | The webcam bubble |
 
+**Installing a new build over an old one.** Builds that aren't signed with an Apple Developer certificate look like a different app to macOS each time, so the Screen Recording toggle in System Settings can show *on* while Scouter is still asked for permission. Reset Scouter's permissions once per new build:
+
+```bash
+tccutil reset All app.scouter.Scouter
+```
+
+Then open Scouter and allow Screen Recording (and Camera/Microphone) again. Building it yourself in Xcode with your Apple ID as the Team avoids this.
+
 ## Using it
 
 **Recording bar.** Opening Scouter (Spotlight, Finder, Dock) shows the bar at the bottom of the screen:
