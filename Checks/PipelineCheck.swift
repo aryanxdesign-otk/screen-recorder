@@ -369,6 +369,12 @@ struct PipelineCheck {
         let mp4 = output.appendingPathComponent("export-1080p.mp4")
         try await exporter.export(media: media, info: project.info, state: project.state, options: ExportOptions(format: .mp4, resolution: .p1080, fps: 60), to: mp4) { _ in }
         try await describeMovie(mp4, expectedSize: CGSize(width: 1920, height: 1080), expectedDuration: duration, expectAudio: true)
+        // A frame from the exported file, mid-zoom, to confirm the compositor path matches the stills.
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: mp4))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let frame = try await generator.image(at: CMTime(seconds: 1.1, preferredTimescale: 600)).image
+        try writeJPEG(frame, to: output.appendingPathComponent("export-frame-1.10s.jpg"))
 
         var cut = project.state
         cut.segments = [ClipSegment(start: 0, end: 1.5), ClipSegment(start: 2.5, end: 4)]
