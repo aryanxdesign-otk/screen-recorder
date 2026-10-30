@@ -4,7 +4,8 @@
 // and clicks), then exercises the model logic, renders stills through FrameRenderer,
 // and runs real MP4 and GIF exports through the custom compositor.
 //
-// Build: swiftc -parse-as-library Checks/PipelineCheck.swift Scouter/Model/*.swift Scouter/Rendering/*.swift Scouter/App/Theme.swift
+// Build: swiftc -parse-as-library Checks/PipelineCheck.swift Scouter/Model/*.swift Scouter/Rendering/*.swift \
+//        Scouter/App/Theme.swift Scouter/Recording/RecordingClock.swift
 
 import AppKit
 import AVFoundation
