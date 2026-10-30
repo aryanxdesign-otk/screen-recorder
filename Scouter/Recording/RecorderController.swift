@@ -111,25 +111,36 @@ final class RecorderController: NSObject {
             }
             return
         }
+        // Ask first: opening the device before access is granted fails on first use.
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            Task { @MainActor [weak self] in
+                self?.showCameraPreview(deviceID: id, granted: granted)
+            }
+        }
+    }
+
+    private func showCameraPreview(deviceID id: String, granted: Bool) {
+        guard granted else {
+            model.selectedCameraID = nil
+            Alerts.show(title: "Camera access is off", message: "Allow Scouter in System Settings → Privacy & Security → Camera to add a webcam bubble.")
+            return
+        }
+        guard model.selectedCameraID == id, isBarVisible || session != nil || isStarting else { return }
         if camera?.deviceID != id {
+            guard session == nil, !isStarting else { return }
             camera?.stopRunning()
             camera = CameraCapture(deviceID: id)
             bubble?.orderOut(nil)
             bubble = nil
         }
         guard let camera else { return }
-        AVCaptureDevice.requestAccess(for: .video) { granted in
-            Task { @MainActor [weak self] in
-                guard let self, granted else { return }
-                camera.startRunning()
-                let bubble = self.bubble ?? CameraBubblePanel(session: camera.session)
-                self.bubble = bubble
-                if !bubble.isVisible {
-                    bubble.place(on: self.bar?.screen ?? NSScreen.withMouse)
-                }
-                bubble.orderFrontRegardless()
-            }
+        camera.startRunning()
+        let bubble = self.bubble ?? CameraBubblePanel(session: camera.session)
+        self.bubble = bubble
+        if !bubble.isVisible {
+            bubble.place(on: bar?.screen ?? NSScreen.withMouse)
         }
+        bubble.orderFrontRegardless()
     }
 
     // MARK: - Target selection
