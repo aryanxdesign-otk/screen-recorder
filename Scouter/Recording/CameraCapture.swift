@@ -11,13 +11,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // Confined to queue.
     private var clock: RecordingClock?
-    private var url: URL?
-    private var writer: AVAssetWriter?
-    private var input: AVAssetWriterInput?
-    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
-    private var lastTime = CMTime.negativeInfinity
-    private var finished = false
-    private var wroteFrames = false
+    private var video: VideoTrackWriter?
 
     init?(deviceID: String) {
         guard let device = AVCaptureDevice(uniqueID: deviceID),
@@ -57,83 +51,33 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func startRecording(to url: URL, clock: RecordingClock) {
         queue.async {
-            self.url = url
             self.clock = clock
-            self.finished = false
-            self.wroteFrames = false
-            self.lastTime = .negativeInfinity
+            // The file is created from the first frame, so it matches the camera's actual size.
+            self.video = VideoTrackWriter(url: url, settings: VideoTrackWriter.cameraSettings)
         }
     }
 
     /// Finishes the file. Returns true if any frames were written.
     func finishRecording() async -> Bool {
-        let state: (AVAssetWriter?, Bool) = await withCheckedContinuation { continuation in
+        let video: VideoTrackWriter? = await withCheckedContinuation { continuation in
             queue.async {
-                self.finished = true
-                self.input?.markAsFinished()
-                let result = (self.writer, self.wroteFrames)
-                self.writer = nil
-                self.input = nil
-                self.adaptor = nil
+                let video = self.video
+                self.video = nil
                 self.clock = nil
-                continuation.resume(returning: result)
+                continuation.resume(returning: video)
             }
         }
-        if let writer = state.0, writer.status == .writing {
-            await writer.finishWriting()
-        }
-        return state.1
+        guard let video else { return false }
+        return await video.finish(on: queue, end: nil)
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let clock, !finished, let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        guard let clock, let video, let pixelBuffer = sampleBuffer.imageBuffer else { return }
         var timestamp = sampleBuffer.presentationTimeStamp
         if let sessionClock = session.synchronizationClock {
             timestamp = CMSyncConvertTime(timestamp, from: sessionClock, to: CMClockGetHostTimeClock())
         }
         guard let time = clock.mediaTime(for: timestamp) else { return }
-        if writer == nil {
-            setUpWriter(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-        }
-        guard let input, let adaptor, input.isReadyForMoreMediaData, time > lastTime else { return }
-        if adaptor.append(pixelBuffer, withPresentationTime: time) {
-            lastTime = time
-            wroteFrames = true
-        }
-    }
-
-    private func setUpWriter(width: Int, height: Int) {
-        guard let url, let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else {
-            finished = true
-            return
-        }
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 6_000_000,
-                AVVideoMaxKeyFrameIntervalKey: 30,
-            ],
-        ]
-        guard writer.canApply(outputSettings: settings, forMediaType: .video) else {
-            finished = true
-            return
-        }
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = true
-        guard writer.canAdd(input) else {
-            finished = true
-            return
-        }
-        writer.add(input)
-        guard writer.startWriting() else {
-            finished = true
-            return
-        }
-        writer.startSession(atSourceTime: .zero)
-        self.writer = writer
-        self.input = input
-        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
+        video.append(pixelBuffer, at: time)
     }
 }

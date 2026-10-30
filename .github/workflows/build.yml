@@ -45,6 +45,7 @@ jobs:
           mkdir -p build
           xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos15.0 \
             Checks/PipelineCheck.swift Scouter/Model/*.swift Scouter/Rendering/*.swift Scouter/App/Theme.swift Scouter/Recording/RecordingClock.swift \
+            Scouter/Recording/TrackWriters.swift Scouter/Recording/CaptureTypes.swift \
             -o build/pipeline-check
           ./build/pipeline-check build/check
       - name: Print review grid

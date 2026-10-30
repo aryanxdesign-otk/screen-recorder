@@ -2,89 +2,6 @@ import AppKit
 import AVFoundation
 import ScreenCaptureKit
 
-/// Writes one audio stream (system audio or microphone) to an AAC file.
-/// The writer is created lazily from the first buffer so it matches the device's format.
-final class AudioTrackWriter: @unchecked Sendable {
-    private let url: URL
-    private let clock: RecordingClock
-    private var writer: AVAssetWriter?
-    private var input: AVAssetWriterInput?
-    private var finished = false
-    private var failedSetup = false
-    private(set) var hasSamples = false
-
-    init(url: URL, clock: RecordingClock) {
-        self.url = url
-        self.clock = clock
-    }
-
-    /// Must be called on the owning queue.
-    func append(_ buffer: CMSampleBuffer) {
-        guard !finished, !failedSetup, buffer.isValid,
-              let time = clock.mediaTime(for: buffer.presentationTimeStamp) else { return }
-        if writer == nil { setUp(with: buffer) }
-        guard let writer, let input, writer.status == .writing, input.isReadyForMoreMediaData,
-              let retimed = buffer.retimed(to: time) else { return }
-        if input.append(retimed) {
-            hasSamples = true
-        }
-    }
-
-    private func setUp(with buffer: CMSampleBuffer) {
-        guard let format = buffer.formatDescription,
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else {
-            failedSetup = true
-            return
-        }
-        let channels = max(1, min(2, Int(asbd.mChannelsPerFrame)))
-        let sampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48_000
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: channels,
-        ]
-        do {
-            let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
-            guard writer.canApply(outputSettings: settings, forMediaType: .audio) else {
-                failedSetup = true
-                return
-            }
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings, sourceFormatHint: format)
-            input.expectsMediaDataInRealTime = true
-            guard writer.canAdd(input) else {
-                failedSetup = true
-                return
-            }
-            writer.add(input)
-            guard writer.startWriting() else {
-                failedSetup = true
-                return
-            }
-            writer.startSession(atSourceTime: .zero)
-            self.writer = writer
-            self.input = input
-        } catch {
-            failedSetup = true
-        }
-    }
-
-    func finish(on queue: DispatchQueue) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async {
-                self.finished = true
-                self.input?.markAsFinished()
-                continuation.resume()
-            }
-        }
-        if let writer, writer.status == .writing {
-            await writer.finishWriting()
-        }
-        if !hasSamples {
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
-}
-
 /// Captures a display, window or area with ScreenCaptureKit and writes it to disk.
 final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     struct Setup {
@@ -102,13 +19,9 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private let micQueue = DispatchQueue(label: "app.scouter.capture.mic", qos: .userInteractive)
 
     // Confined to videoQueue.
-    private var videoWriter: AVAssetWriter?
-    private var videoInput: AVAssetWriterInput?
-    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var video: VideoTrackWriter?
     private var latestFrame: CVPixelBuffer?
-    private var lastVideoTime = CMTime.negativeInfinity
     private var writing = false
-    private var videoFinished = false
 
     private var systemAudio: AudioTrackWriter?
     private var microphone: AudioTrackWriter?
@@ -178,7 +91,9 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             config.microphoneCaptureDeviceID = microphoneID
         }
 
-        try setUpVideoWriter(width: width, height: height)
+        let video = VideoTrackWriter(url: Project.screenURL(in: folder), settings: VideoTrackWriter.screenSettings)
+        try video.start(width: width, height: height)
+        self.video = video
         if captureSystemAudio {
             systemAudio = AudioTrackWriter(url: Project.systemAudioURL(in: folder), clock: clock)
         }
@@ -200,49 +115,13 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         return Setup(pixelSize: CGSize(width: width, height: height), captureRect: captureRect)
     }
 
-    private func setUpVideoWriter(width: Int, height: Int) throws {
-        let writer = try AVAssetWriter(outputURL: Project.screenURL(in: folder), fileType: .mov)
-        let bitrate = min(Double(width * height) * 6, 90_000_000)
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoColorPropertiesKey: [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-            ],
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: bitrate,
-                AVVideoExpectedSourceFrameRateKey: 60,
-                AVVideoMaxKeyFrameIntervalKey: 60,
-                AVVideoAllowFrameReorderingKey: false,
-            ],
-        ]
-        guard writer.canApply(outputSettings: settings, forMediaType: .video) else {
-            throw ScouterError.writerFailed("The video encoder doesn't support \(width)×\(height).")
-        }
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = true
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
-        guard writer.canAdd(input) else { throw ScouterError.writerFailed("Couldn't add the video track.") }
-        writer.add(input)
-        guard writer.startWriting() else {
-            throw ScouterError.writerFailed(writer.error?.localizedDescription ?? "Couldn't start writing.")
-        }
-        writer.startSession(atSourceTime: .zero)
-        videoWriter = writer
-        videoInput = input
-        self.adaptor = adaptor
-    }
-
     /// Call after `clock.start()`. The most recent frame becomes frame zero so the
     /// video starts immediately even if the screen is static.
     func beginWriting() {
         videoQueue.async {
             self.writing = true
             if let frame = self.latestFrame {
-                self.appendVideo(frame, at: .zero)
+                self.video?.append(frame, at: .zero)
             }
         }
     }
@@ -252,19 +131,14 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             try? await stream.stopCapture()
         }
         stream = nil
-
-        let lastTime: CMTime = await withCheckedContinuation { continuation in
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             videoQueue.async {
-                self.videoFinished = true
+                self.writing = false
                 self.latestFrame = nil
-                self.videoInput?.markAsFinished()
-                continuation.resume(returning: self.lastVideoTime)
+                continuation.resume()
             }
         }
-        if let writer = videoWriter, writer.status == .writing {
-            writer.endSession(atSourceTime: end > lastTime ? end : lastTime)
-            await writer.finishWriting()
-        }
+        _ = await video?.finish(on: videoQueue, end: end)
         await systemAudio?.finish(on: audioQueue)
         await microphone?.finish(on: micQueue)
     }
@@ -276,12 +150,14 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         stream = nil
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             videoQueue.async {
-                self.videoFinished = true
+                self.writing = false
                 self.latestFrame = nil
-                self.videoWriter?.cancelWriting()
+                self.video?.cancel()
                 continuation.resume()
             }
         }
+        await systemAudio?.finish(on: audioQueue)
+        await microphone?.finish(on: micQueue)
     }
 
     // MARK: - SCStreamOutput
@@ -304,22 +180,20 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard !videoFinished, sampleBuffer.isValid,
+        guard sampleBuffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = attachments.first?[.status] as? Int,
               let status = SCFrameStatus(rawValue: statusRaw),
               status == .complete,
               let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
-        latestFrame = pixelBuffer
-        guard writing, let time = clock.mediaTime(for: sampleBuffer.presentationTimeStamp) else { return }
-        appendVideo(pixelBuffer, at: time)
-    }
-
-    private func appendVideo(_ pixelBuffer: CVPixelBuffer, at time: CMTime) {
-        guard let input = videoInput, let adaptor, input.isReadyForMoreMediaData, time > lastVideoTime else { return }
-        if adaptor.append(pixelBuffer, withPresentationTime: time) {
-            lastVideoTime = time
+        guard writing else {
+            // Keep the latest frame during the countdown so recording starts on a real frame.
+            latestFrame = pixelBuffer
+            return
         }
+        latestFrame = nil
+        guard let time = clock.mediaTime(for: sampleBuffer.presentationTimeStamp) else { return }
+        video?.append(pixelBuffer, at: time)
     }
 }

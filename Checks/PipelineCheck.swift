@@ -39,6 +39,9 @@ struct PipelineCheck {
         checkClock()
         checkEncoderSupport()
 
+        print("Recording writers")
+        try await checkTrackWriters(in: output)
+
         print("Synthetic recording")
         let project = try await makeSyntheticProject(in: output)
         let media = try await LoadedMedia.load(project: project)
@@ -127,6 +130,106 @@ struct PipelineCheck {
         guard let writer = try? AVAssetWriter(outputURL: FileManager.default.temporaryDirectory.appendingPathComponent("probe.mov"), fileType: .mov) else { return }
         let hevc: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: 3024, AVVideoHeightKey: 1964]
         print("  · HEVC 3024×1964 encoder available on this machine: \(writer.canApply(outputSettings: hevc, forMediaType: .video))")
+    }
+
+    // MARK: - Recording writers
+
+    /// Drives the same writers the recorder uses (screen, camera, microphone) with frames and audio
+    /// on a recording clock that includes a pause, the way a real recording would.
+    static func checkTrackWriters(in output: URL) async throws {
+        let queue = DispatchQueue(label: "check.writers")
+        let clock = RecordingClock()
+        let t0 = CMTime(seconds: 5000, preferredTimescale: 1_000_000_000)
+        func host(_ s: Double) -> CMTime { t0 + CMTime(seconds: s, preferredTimescale: 1_000_000_000) }
+        clock.start(at: t0)
+        clock.pause(at: host(1.0))
+        clock.resume(at: host(1.5))
+        let end = clock.elapsed(at: host(2.0))
+        expect(abs(end.seconds - 1.5) < 1e-6, "2 s with a 0.5 s pause records 1.5 s")
+
+        // Camera-style: file created lazily from the first frame (the path that used to crash).
+        let cameraURL = output.appendingPathComponent("writer-camera.mov")
+        let camera = VideoTrackWriter(url: cameraURL, settings: VideoTrackWriter.cameraSettings)
+        // Screen-style: file created up front at a Retina-like size.
+        let screenURL = output.appendingPathComponent("writer-screen.mov")
+        let screen = VideoTrackWriter(url: screenURL, settings: VideoTrackWriter.screenSettings)
+        try queue.sync { try screen.start(width: 2560, height: 1600) }
+
+        let cameraFrame = makePixelBuffer(width: 1280, height: 720)
+        let screenFrame = makePixelBuffer(width: 2560, height: 1600)
+        for i in 0..<60 {
+            guard let time = clock.mediaTime(for: host(Double(i) / 30)) else { continue }
+            queue.sync {
+                camera.append(cameraFrame, at: time)
+                screen.append(screenFrame, at: time)
+            }
+            try await Task.sleep(nanoseconds: 4_000_000)
+        }
+        let cameraOK = await camera.finish(on: queue, end: nil)
+        let screenOK = await screen.finish(on: queue, end: end)
+        expect(cameraOK && camera.frameCount > 20, "camera writer records frames (\(camera.frameCount))")
+        expect(screenOK && screen.frameCount > 20, "screen writer records frames (\(screen.frameCount))")
+        if screenOK {
+            let duration = try await AVURLAsset(url: screenURL).load(.duration).seconds
+            expect(abs(duration - 1.5) < 0.05, "screen file skips the pause and lasts \(String(format: "%.2f", duration))s")
+        }
+
+        // Microphone-style: 48 kHz mono float buffers every 10 ms, retimed onto the clock.
+        let micURL = output.appendingPathComponent("writer-mic.m4a")
+        let mic = AudioTrackWriter(url: micURL, clock: clock)
+        for chunk in 0..<200 {
+            guard let buffer = makeAudioBuffer(frames: 480, sampleRate: 48_000, pts: host(Double(chunk) * 0.01)) else { continue }
+            queue.sync { mic.append(buffer) }
+            if chunk % 10 == 0 { try await Task.sleep(nanoseconds: 2_000_000) }
+        }
+        let micOK = await mic.finish(on: queue)
+        expect(micOK, "microphone writer produces a file")
+        if micOK {
+            let duration = try await AVURLAsset(url: micURL).load(.duration).seconds
+            expect(abs(duration - 1.5) < 0.1, "microphone file skips the pause and lasts \(String(format: "%.2f", duration))s")
+        }
+
+        // A writer that never receives anything leaves no file behind.
+        let emptyURL = output.appendingPathComponent("writer-empty.mov")
+        let empty = VideoTrackWriter(url: emptyURL, settings: VideoTrackWriter.cameraSettings)
+        let emptyOK = await empty.finish(on: queue, end: nil)
+        expect(!emptyOK && !FileManager.default.fileExists(atPath: emptyURL.path), "an unused camera writer leaves no file")
+    }
+
+    static func makePixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary, &buffer)
+        let pixelBuffer = buffer!
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        memset(CVPixelBufferGetBaseAddress(pixelBuffer), 0x80, CVPixelBufferGetDataSize(pixelBuffer))
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        return pixelBuffer
+    }
+
+    static func makeAudioBuffer(frames: Int, sampleRate: Double, pts: CMTime) -> CMSampleBuffer? {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        var format: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        let byteCount = frames * 4
+        var block: CMBlockBuffer?
+        CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount, blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0, dataLength: byteCount, flags: 0, blockBufferOut: &block)
+        guard let format, let block else { return nil }
+        CMBlockBufferAssureBlockMemory(block)
+        var samples = (0..<frames).map { Float(sin(Double($0) * 0.0576) * 0.2) }
+        CMBlockBufferReplaceDataBytes(with: &samples, blockBuffer: block, offsetIntoDestination: 0, dataLength: byteCount)
+        var sampleBuffer: CMSampleBuffer?
+        CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: frames, presentationTimeStamp: pts, packetDescriptions: nil, sampleBufferOut: &sampleBuffer)
+        return sampleBuffer
     }
 
     // MARK: - Synthetic recording
