@@ -355,6 +355,27 @@ struct PipelineCheck {
         }
     }
 
+    /// 3×2 grid of the key renders, small enough to inspect from the CI log.
+    static func makeReviewGrid(in output: URL) throws {
+        let names = ["still-0.30s.jpg", "still-1.10s.jpg", "still-2.00s.jpg", "export-frame-1.10s.jpg", "variant-vertical.jpg", "variant-solid.jpg"]
+        let tile = CGSize(width: 480, height: 270)
+        let context = CGContext(data: nil, width: Int(tile.width) * 3, height: Int(tile.height) * 2, bitsPerComponent: 8, bytesPerRow: 0, space: RenderContext.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(gray: 0.15, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: tile.width * 3, height: tile.height * 2))
+        context.interpolationQuality = .high
+        for (index, name) in names.enumerated() {
+            guard let source = CGImageSourceCreateWithURL(output.appendingPathComponent(name) as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+            let cell = CGRect(x: CGFloat(index % 3) * tile.width, y: CGFloat(1 - index / 3) * tile.height, width: tile.width, height: tile.height)
+            let scale = min(cell.width / CGFloat(image.width), cell.height / CGFloat(image.height))
+            let size = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+            context.draw(image, in: CGRect(x: cell.midX - size.width / 2, y: cell.midY - size.height / 2, width: size.width, height: size.height))
+        }
+        if let grid = context.makeImage() {
+            try writeJPEG(grid, to: output.appendingPathComponent("review-grid.jpg"), quality: 0.6)
+        }
+    }
+
     static func writeJPEG(_ image: CGImage, to url: URL, quality: Double = 0.85) throws {
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
@@ -375,6 +396,7 @@ struct PipelineCheck {
         generator.requestedTimeToleranceAfter = .zero
         let frame = try await generator.image(at: CMTime(seconds: 1.1, preferredTimescale: 600)).image
         try writeJPEG(frame, to: output.appendingPathComponent("export-frame-1.10s.jpg"))
+        try makeReviewGrid(in: output)
 
         var cut = project.state
         cut.segments = [ClipSegment(start: 0, end: 1.5), ClipSegment(start: 2.5, end: 4)]

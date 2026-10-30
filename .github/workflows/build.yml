@@ -22,17 +22,14 @@ jobs:
             Checks/PipelineCheck.swift Scouter/Model/*.swift Scouter/Rendering/*.swift Scouter/App/Theme.swift Scouter/Recording/RecordingClock.swift \
             -o build/pipeline-check
           ./build/pipeline-check build/check
-      - name: Print preview images
+      - name: Print review grid
         if: always()
         run: |
-          cd build/check 2>/dev/null || exit 0
-          for f in still-0.30s.jpg still-1.10s.jpg still-2.00s.jpg export-frame-1.10s.jpg variant-vertical.jpg variant-solid.jpg; do
-            [ -f "$f" ] || continue
-            sips -Z 960 -s formatOptions 60 "$f" --out "/tmp/small-$f" >/dev/null
-            echo "BEGIN-B64 $f"
-            base64 -i "/tmp/small-$f" | fold -w 4000
-            echo "END-B64 $f"
-          done
+          f=build/check/review-grid.jpg
+          [ -f "$f" ] || exit 0
+          echo "BEGIN-B64 review-grid.jpg"
+          base64 -i "$f" | fold -w 8000
+          echo "END-B64 review-grid.jpg"
       - name: Upload check output
         if: always()
         uses: actions/upload-artifact@v4
