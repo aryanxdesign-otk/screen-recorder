@@ -19,15 +19,27 @@ jobs:
         run: |
           xcodebuild -project Scouter.xcodeproj -scheme Scouter -configuration Release \
             -destination 'generic/platform=macOS' -derivedDataPath build/dd -quiet build
-          cd build/dd/Build/Products/Release
-          codesign --verify --verbose Scouter.app
-          lipo -archs Scouter.app/Contents/MacOS/Scouter
-          ditto -c -k --sequesterRsrc --keepParent Scouter.app "$GITHUB_WORKSPACE/build/Scouter.zip"
+          app=build/dd/Build/Products/Release/Scouter.app
+          codesign --verify --deep --verbose "$app"
+          lipo -archs "$app/Contents/MacOS/Scouter"
+          mkdir -p build/dmg
+          ditto "$app" build/dmg/Scouter.app
+          ln -s /Applications build/dmg/Applications
+          # hdiutil is occasionally "busy" on hosted runners; retry a few times.
+          for i in 1 2 3 4 5; do
+            hdiutil create -volname Scouter -srcfolder build/dmg -ov -format UDZO build/Scouter.dmg && break
+            sleep 5
+          done
+          hdiutil verify build/Scouter.dmg
+          # Mount it the way a user would and check the app inside is intact.
+          mount=$(hdiutil attach -nobrowse -readonly build/Scouter.dmg | tail -1 | awk -F'\t' '{print $NF}')
+          codesign --verify --deep --verbose "$mount/Scouter.app"
+          hdiutil detach "$mount"
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:
           name: Scouter-app
-          path: build/Scouter.zip
+          path: build/Scouter.dmg
       - name: Pipeline checks
         run: |
           mkdir -p build
