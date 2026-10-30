@@ -312,6 +312,7 @@ struct PipelineCheck {
                 continue
             }
             expect(cg.width == Int(canvas.width) && cg.height == Int(canvas.height), "still at \(time)s is \(cg.width)×\(cg.height), zoom \(String(format: "%.2f", path.state(at: time).scale))×")
+            checkPixels(cg, snapshot: snapshot, time: time)
             try writeJPEG(cg, to: output.appendingPathComponent(String(format: "still-%.2fs.jpg", time)))
             tiles.append(cg)
         }
@@ -355,10 +356,76 @@ struct PipelineCheck {
         }
     }
 
+    // MARK: - Pixel checks
+
+    struct Pixel {
+        let r: Int, g: Int, b: Int
+        func near(_ hex: UInt32, tolerance: Int = 40) -> Bool {
+            abs(r - Int((hex >> 16) & 0xFF)) <= tolerance && abs(g - Int((hex >> 8) & 0xFF)) <= tolerance && abs(b - Int(hex & 0xFF)) <= tolerance
+        }
+        var description: String { String(format: "#%02X%02X%02X", r, g, b) }
+    }
+
+    /// Pixel at a top-left-origin coordinate.
+    static func pixel(_ image: CGImage, _ point: CGPoint) -> Pixel {
+        let w = image.width, h = image.height
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        data.withUnsafeMutableBytes { buffer in
+            let context = CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: RenderContext.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        let x = min(max(Int(point.x), 0), w - 1)
+        let y = min(max(Int(point.y), 0), h - 1)
+        let i = (y * w + x) * 4
+        return Pixel(r: Int(data[i]), g: Int(data[i + 1]), b: Int(data[i + 2]))
+    }
+
+    /// Checks orientation, layout, the webcam bubble and zoom targeting against the synthetic content.
+    static func checkPixels(_ image: CGImage, snapshot: RenderSnapshot, time: Double) {
+        let geometry = snapshot.geometry
+        let camera = snapshot.cameraPath.state(at: time)
+        let view = geometry.viewRect(scale: camera.scale, focus: camera.focus)
+        let s = snapshot.canvas.width / view.width
+        // Source-normalised point -> output pixel (top-left origin).
+        func output(_ x: Double, _ y: Double) -> CGPoint {
+            let c = geometry.contentRect
+            return CGPoint(x: (c.minX + x * c.width - view.minX) * s, y: (c.minY + y * c.height - view.minY) * s)
+        }
+
+        if camera.scale < 1.01 {
+            let titleBar = pixel(image, output(0.5, 0.02))
+            expect(titleBar.near(0xE4E4E7, tolerance: 24), "t=\(time): title bar is at the top (\(titleBar.description))")
+            let sidebar = pixel(image, output(0.07, 0.97))
+            expect(sidebar.near(0xFAFAFA, tolerance: 24), "t=\(time): sidebar is bottom-left (\(sidebar.description))")
+            let padding = pixel(image, CGPoint(x: snapshot.canvas.width / 2, y: geometry.contentRect.minY / 3))
+            expect(!padding.near(0xFAFAFA, tolerance: 60), "t=\(time): wallpaper shows in the padding (\(padding.description))")
+
+            let shortSide = min(snapshot.canvas.width, snapshot.canvas.height)
+            let diameter = snapshot.state.camera.size * shortSide
+            let margin = 0.04 * shortSide
+            let center = CGPoint(x: margin + diameter / 2, y: snapshot.canvas.height - margin - diameter / 2)
+            let face = pixel(image, center)
+            expect(face.near(0xF2C6A0, tolerance: 45), "t=\(time): webcam bubble sits bottom-left (\(face.description))")
+            let shoulders = pixel(image, CGPoint(x: center.x, y: center.y + diameter * 0.42))
+            expect(shoulders.near(0x0F172A, tolerance: 45), "t=\(time): webcam is upright (\(shoulders.description))")
+        }
+
+        if time >= 1.9, time <= 2.1 {
+            // The clicked button (green after the click) should be on screen and magnified.
+            let button = output(0.28, 0.3)
+            let inside = CGRect(origin: .zero, size: snapshot.canvas).insetBy(dx: 10, dy: 10).contains(button)
+            expect(inside, "t=\(time): zoom keeps the clicked button in view")
+            if inside {
+                let color = pixel(image, button)
+                expect(color.near(0x16A34A, tolerance: 50), "t=\(time): zoom is centred on the clicked button (\(color.description))")
+            }
+        }
+    }
+
     /// 3×2 grid of the key renders, small enough to inspect from the CI log.
     static func makeReviewGrid(in output: URL) throws {
         let names = ["still-0.30s.jpg", "still-1.10s.jpg", "still-2.00s.jpg", "export-frame-1.10s.jpg", "variant-vertical.jpg", "variant-solid.jpg"]
-        let tile = CGSize(width: 480, height: 270)
+        let tile = CGSize(width: 288, height: 162)
         let context = CGContext(data: nil, width: Int(tile.width) * 3, height: Int(tile.height) * 2, bitsPerComponent: 8, bytesPerRow: 0, space: RenderContext.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.setFillColor(CGColor(gray: 0.15, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: tile.width * 3, height: tile.height * 2))
@@ -372,7 +439,7 @@ struct PipelineCheck {
             context.draw(image, in: CGRect(x: cell.midX - size.width / 2, y: cell.midY - size.height / 2, width: size.width, height: size.height))
         }
         if let grid = context.makeImage() {
-            try writeJPEG(grid, to: output.appendingPathComponent("review-grid.jpg"), quality: 0.6)
+            try writeJPEG(grid, to: output.appendingPathComponent("review-grid.jpg"), quality: 0.5)
         }
     }
 

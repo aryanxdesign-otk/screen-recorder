@@ -27,7 +27,7 @@ jobs:
         run: |
           f=build/check/review-grid.jpg
           [ -f "$f" ] || exit 0
-          echo "BEGIN-B64 review-grid.jpg"
+          echo "BEGIN-B64 review-grid.jpg $(wc -c < "$f") bytes"
           base64 -i "$f" | fold -w 8000
           echo "END-B64 review-grid.jpg"
       - name: Upload check output
