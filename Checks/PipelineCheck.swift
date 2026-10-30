@@ -163,12 +163,13 @@ struct PipelineCheck {
                 camera.append(cameraFrame, at: time)
                 screen.append(screenFrame, at: time)
             }
-            try await Task.sleep(nanoseconds: 4_000_000)
+            // Real-time pacing: the encoders drop frames they can't keep up with, as they would live.
+            try await Task.sleep(nanoseconds: 33_000_000)
         }
         let cameraOK = await camera.finish(on: queue, end: nil)
         let screenOK = await screen.finish(on: queue, end: end)
-        expect(cameraOK && camera.frameCount > 20, "camera writer records frames (\(camera.frameCount))")
-        expect(screenOK && screen.frameCount > 20, "screen writer records frames (\(screen.frameCount))")
+        expect(cameraOK && camera.frameCount >= 30, "camera writer records frames (\(camera.frameCount))")
+        expect(screenOK && screen.frameCount >= 30, "screen writer records frames (\(screen.frameCount))")
         if screenOK {
             let duration = try await AVURLAsset(url: screenURL).load(.duration).seconds
             expect(abs(duration - 1.5) < 0.05, "screen file skips the pause and lasts \(String(format: "%.2f", duration))s")
